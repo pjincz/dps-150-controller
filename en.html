@@ -4,6 +4,7 @@
   <meta charset="UTF-8">
   <title>Fnirsi DSP-150 Controller</title>
   <style>
+    .page-header { display: flex; align-items: center; gap: 16px; }
     textarea { font-family: monospace; }
     /* Prevent Chart.js from overriding canvas display */
     canvas { display: inline !important; }
@@ -12,8 +13,10 @@
   <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns"></script>
 </head>
 <body>
-  <h2>Fnirsi DSP-150 Controller</h2>
-  <button type="button" onclick="window.location.href='zh.html'" aria-label="切换到中文">🌐 中文</button>
+  <div class="page-header">
+    <h2>Fnirsi DSP-150 Controller</h2>
+    <button type="button" onclick="window.location.href='zh.html'" aria-label="切换到中文">🌐 中文</button>
+  </div>
 
   <button onclick="connectDevice()">🔌 Connect Device</button>
   <button onclick="disconnectDevice()">❌ Disconnect Device</button>
