@@ -1,0 +1,475 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <title>Fnirsi DSP-150 上位机</title>
+  <style>
+    textarea { font-family: monospace; }
+    /* Prevent Chart.js from overriding canvas display */
+    canvas { display: inline !important; }
+  </style>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns"></script>
+</head>
+<body>
+  <h2>Fnirsi DSP-150 上位机</h2>
+  <button type="button" onclick="window.location.href='en.html'" aria-label="Switch to English">🌐 English</button>
+
+  <button onclick="connectDevice()">🔌 连接设备</button>
+  <button onclick="disconnectDevice()">❌ 断开设备</button>
+  <button onclick="sendStart()">▶️ 启动输出</button>
+  <button onclick="sendStop()">⏹ 停止输出</button>
+  <button onclick="clearLog()">🧹 清空日志</button>
+  <button onclick="exportCSV()">📥 导出数据</button>
+
+  <!-- Status Indicator Panel -->
+  <div id="statusPanel" style="display: flex; gap: 20px; margin: 10px 0;">
+    <div><strong>设备状态：</strong><span id="deviceStatus">--</span></div>
+    <div><strong>输出模式：</strong><span id="modeStatus">--</span></div>
+    <div><strong>累计电流：</strong><span id="totalAh">--</span></div>
+    <div><strong>累计电量：</strong><span id="totalWh">--</span></div>
+  </div>
+
+  <svg id="voltageSvg" width="200" height="80" viewBox="0 10 200 80">
+    <!-- Background arc, gray -->
+    <path d="M22.058,65 A90,90 0 0,1 177.942,65" fill="none" stroke="#ccc" stroke-width="10"/>
+  
+    <!-- Progress arc, red -->
+    <path id="voltageArc" d="M22.058,65 A90,90 0 0,1 177.942,65" fill="none" stroke="#4caf50" stroke-width="10" stroke-dasharray="0 999"/>
+  
+    <!-- Scales -->
+    <text x="30" y="80" font-size="14" text-anchor="middle">0</text>
+    <text id="voltageMaxLabel" x="170" y="80" font-size="14" text-anchor="middle">--</text>
+
+    <!-- Pointer -->
+    <line id="voltageNeedle" x1="13.397" y1="60" x2="100" y2="110" stroke="red" stroke-width="3" />
+
+    <!-- Current value, big number -->
+    <text id="voltageLabel" x="100" y="70" text-anchor="middle" font-size="20" fill="#000">V</text>
+  </svg>  
+  <canvas id="voltageChart" width="500" height="80"></canvas>
+  <br><br>
+
+  <svg id="currentSvg" width="200" height="80" viewBox="0 10 200 80">
+    <path d="M22.058,65 A90,90 0 0,1 177.942,65" fill="none" stroke="#ccc" stroke-width="10"/>
+    <path id="currentArc" d="M22.058,65 A90,90 0 0,1 177.942,65" fill="none" stroke="#4caf50" stroke-width="10" stroke-dasharray="0 999"/>
+    <text x="30" y="80" font-size="14" text-anchor="middle">0</text>
+    <text id="currentMaxLabel" x="170" y="80" font-size="14" text-anchor="middle">--</text>
+    <line id="currentNeedle" x1="13.397" y1="60" x2="100" y2="110" stroke="red" stroke-width="3" />
+    <text id="currentLabel" x="100" y="70" text-anchor="middle" font-size="20" fill="#000">A</text>
+  </svg>
+  <canvas id="currentChart" width="500" height="80"></canvas>
+  <br><br>
+
+  <svg id="powerSvg" width="200" height="80" viewBox="0 10 200 80">
+    <path d="M22.058,65 A90,90 0 0,1 177.942,65" fill="none" stroke="#ccc" stroke-width="10"/>
+    <path id="powerArc" d="M22.058,65 A90,90 0 0,1 177.942,65" fill="none" stroke="#4caf50" stroke-width="10" stroke-dasharray="0 999"/>
+    <text x="30" y="80" font-size="14" text-anchor="middle">0</text>
+    <text id="powerMaxLabel" x="170" y="80" font-size="14" text-anchor="middle">--</text>
+    <line id="powerNeedle" x1="13.397" y1="60" x2="100" y2="110" stroke="red" stroke-width="3" />
+    <text id="powerLabel" x="100" y="70" text-anchor="middle" font-size="20" fill="#000">W</text>
+  </svg>
+  <canvas id="powerChart" width="500" height="80"></canvas>
+  <br><br>
+
+  <textarea id="log" cols="90" rows="20" readonly></textarea>
+  <br><br>
+
+  <script>
+    let port, reader, writer;
+    let buffer = [];
+    let metrics = {};
+    let charts = {};
+
+    function updateMetric(metric, value) {
+      if (metrics[metric] === value) return;
+      metrics[metric] = value;
+
+      switch (metric) {
+        case "deviceStatus": {
+          const text = value ? "运行中 ✅" : "已停止 ⏹️";
+          document.getElementById("deviceStatus").textContent = text;
+          break;
+        }
+        case "modeStatus": {
+          const text = value === "CV" ? "恒压 (CV)" : "恒流 (CC)";
+          document.getElementById("modeStatus").textContent = text;
+          break;
+        }
+        case "totalAh": {
+          document.getElementById("totalAh").textContent = value.toFixed(6) + " Ah";
+          break;
+        }
+        case "totalWh": {
+          document.getElementById("totalWh").textContent = value.toFixed(6) + " Wh";
+          break;
+        }
+        case "voltage": case "setVoltage": {
+          if (metric === "setVoltage") {
+            charts.voltage.options.scales.y.min = 0;
+            charts.voltage.options.scales.y.max = value;
+            charts.voltage.update();
+          }
+          updateDash("voltage", metrics.voltage ?? 0, metrics.setVoltage ?? 5, "V");
+          break;
+        }
+        case "current": case "setCurrent": {
+          if (metric === "setCurrent") {
+            charts.current.options.scales.y.min = 0;
+            charts.current.options.scales.y.max = value;
+            charts.current.update();
+          }
+          updateDash("current", metrics.current ?? 0, metrics.setCurrent ?? 1, "A");
+        }
+        case "power": case "setVoltage": case "setCurrent": {
+          const setPower = (metrics.setVoltage ?? 5) * (metrics.setCurrent ?? 1);
+          if (metric !== "power") {
+            charts.power.options.scales.y.min = 0;
+            charts.power.options.scales.y.max = setPower;
+            charts.power.update();
+          }
+          updateDash("power", metrics.power ?? 0, setPower, "W");
+        }
+      }
+    }
+
+    function updateDash(id, val, max, unit) {
+      const percent = Math.min(val / max, 1);
+      const arcLen = Math.PI * 90 * (120 / 180); // radius 90, 120 degress
+      const dash = percent * arcLen;
+
+      // Update green arc
+      document.getElementById(`${id}Arc`).setAttribute("stroke-dasharray", `${dash} 999`);
+
+      // Update pointer angle
+      const angle = percent * 120;
+      document.getElementById(`${id}Needle`).setAttribute("transform", `rotate(${angle} 100 110)`);
+
+      // Update text
+      document.getElementById(`${id}Label`).textContent = `${val.toFixed(3)} ${unit}`;
+      document.getElementById(`${id}MaxLabel`).textContent = `${max.toFixed(3)}`;
+    }
+
+
+    function sleep(ms) {
+      return new Promise(resolve => setTimeout(resolve, ms));
+    }
+
+    function initCharts() {
+      const chartList = {
+        voltage: "电压",
+        current: "电流",
+        power: "功率",
+      };
+      for (let id of Object.keys(chartList)) {
+        if (!charts[id]) {
+          charts[id] = new Chart(document.getElementById(`${id}Chart`), {
+            type: 'line',
+            data: {
+              labels: [], // Date
+              datasets: [
+                {
+                  label: chartList[id],
+                  data: [],
+                  borderColor: 'green',
+                  pointRadius: 0,
+                  borderWidth: 1,
+                  clip: false,
+                },
+              ]
+            },
+            options: {
+              responsive: false,
+              scales: {
+                x: { type: 'time', display: false },
+                y: {
+                  type: 'linear',
+                  display: true,
+                  position: 'right',
+                  afterFit: scale => {scale.width = 40},
+                },
+              },
+              plugins: {
+                legend: {
+                  display: false,
+                },
+                tooltip: {
+                  mode: 'index',
+                  intersect: false
+                }
+              },
+              hover: {
+                mode: 'nearest',
+                intersect: false
+              },
+              animation: false,
+            }
+          });
+        } else {
+          charts[id].data.labels = [];
+          charts[id].data.datasets[0].data = [];
+
+          charts[id].update();
+        }
+      }
+    }
+
+    async function connectDevice() {
+      try {
+        port = await navigator.serial.requestPort();
+        await port.open({ baudRate: 9600 });
+
+        writer = port.writable.getWriter();
+        reader = port.readable.getReader();
+
+        initCharts();
+
+        log("✅ 串口已连接，发送初始化指令...");
+        await sendHex("f1 c1 00 01 01 02");  // Connect to device
+        await sleep(5);
+        await sendHex("f1 a1 c1 01 00 c2");  // Query set voltage
+        await sleep(5);
+        await sendHex("f1 a1 c2 01 00 c3");  // Query set current
+        await sleep(5);
+        await sendHex("f1 a1 db 01 00 dc");  // Query device running status
+        await sleep(5);
+        await sendHex("f1 a1 dd 01 00 de");  // Query CV/CC mode status
+        await sleep(5);
+        await sendHex("f1 a1 d9 01 00 da");  // Query total ampere-hour
+        await sleep(5);
+        await sendHex("f1 a1 da 01 00 db");  // Query total watt-hour
+
+        // Start read loop
+        readLoop();
+
+      } catch (err) {
+        log("❌ 连接失败：" + err);
+      }
+    }
+
+    async function disconnectDevice() {
+      try {
+        if (writer) {
+          log("📴 发送断开指令...");
+          await sendHex("f1 c1 00 01 00 01");  // Disconnect device
+          writer.releaseLock();
+          writer = null;
+        }
+        if (reader) {
+          await reader.cancel();
+          reader.releaseLock();
+          reader = null;
+        }
+        if (port) {
+          await port.close();
+          port = null;
+        }
+        log("✅ 串口已关闭");
+      } catch (err) {
+        log("❌ 断开失败：" + err);
+      }
+    }
+
+    async function readLoop() {
+      try {
+        while (port && reader) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          if (value) {
+            for (let byte of value) buffer.push(byte);
+            processBuffer();
+          }
+        }
+      } catch (err) {
+        log("❌ 读取中断：" + err);
+      }
+    }
+
+    function processBuffer() {
+      // Each packet starts with 0xF0, length is in byte 3 (fixed format)
+      while (buffer.length >= 4) {
+        if (buffer[0] !== 0xf0) {
+          buffer.shift(); // Discard invalid bytes
+          continue;
+        }
+        const len = buffer[3];
+        const totalLen = 4 + len + 1; // f0, cmd, opt, len, data..., checksum
+        if (buffer.length < totalLen) return; // Incomplete packet
+
+        const packet = buffer.slice(0, totalLen);
+        buffer = buffer.slice(totalLen);
+        handlePacket(packet);
+      }
+    }
+
+    function handlePacket(packet) {
+      const cmd = packet[1];
+      const opt = packet[2];
+      const len = packet[3];
+      const data = packet.slice(4, 4 + len);
+      const dv = new DataView(new Uint8Array(data).buffer);
+
+      function f32(offset) {
+        return dv.getFloat32(offset, true);
+      }
+
+      switch (opt) {
+        case 0xc3: {
+          const voltage = Math.max(0, f32(0));
+          const current = Math.max(0, f32(4));
+          const power = Math.max(0, f32(8));
+          log(`⚡ 实时输出：${voltage} V, ${current} A, ${power} W`);
+          updateMetric("voltage", voltage);
+          updateMetric("current", current);
+          updateMetric("power", power);
+
+          const now = new Date();
+          charts.voltage.data.labels.push(now);
+          charts.voltage.data.datasets[0].data.push(voltage);
+          charts.voltage.update();
+
+          charts.current.data.labels.push(now);
+          charts.current.data.datasets[0].data.push(current);
+          charts.current.update();
+
+          charts.power.data.labels.push(now);
+          charts.power.data.datasets[0].data.push(power);
+          charts.power.update();
+
+          break;
+        }
+        case 0xc0: {
+          const inputVoltage = f32(0);
+          log(`🔌 输入电压：${inputVoltage} V`);
+          updateMetric("inputVoltage", inputVoltage);
+          break;
+        }
+        case 0xc4: {
+          const temp = f32(0);
+          log(`🌡️ 设备温度：${temp} °C`);
+          updateMetric("temp", temp);
+          break;
+        }
+        case 0xd9: {
+          const ah = f32(0);
+          log(`🔋 累计电流：${ah} Ah`);
+          updateMetric("totalAh", ah);
+          break;
+        }
+        case 0xda: {
+          const wh = f32(0);
+          log(`⚡ 累计电量：${wh} Wh`);
+          updateMetric("totalWh", wh);
+          break;
+        }
+        case 0xe2: {
+          const avaliableVoltage = f32(0);
+          log(`📏 最大可用电压：${avaliableVoltage} V`);
+          updateMetric("avaliableVoltage", avaliableVoltage);
+          break;
+        }
+        case 0xe3: {
+          const avaliableCurrent = f32(0);
+          log(`📏 最大可用电流：${avaliableCurrent} A`);
+          updateMetric("avaliableCurrent", avaliableCurrent);
+          break;
+        }
+        case 0xdb: {
+          const running = data[0] === 1;
+          document.getElementById("deviceStatus").textContent = running ? "运行中 ✅" : "停止 ⏹️";
+          updateMetric("deviceStatus", running);
+          break;
+        }
+        case 0xdd: {
+          const mode = data[0] === 1 ? "CV" : "CC";
+          log(`⚙️ 模式状态：${mode}`);
+          updateMetric("modeStatus", mode);
+          break;
+        }
+        case 0xc1: {
+          const setVoltage = f32(0);
+          log(`🎚️ 设定电压：${setVoltage} V`);
+          updateMetric("setVoltage", setVoltage);
+          break;
+        }
+        case 0xc2: {
+          const setCurrent = f32(0);
+          log(`🎚️ 设定电流：${setCurrent} A`);
+          updateMetric("setCurrent", setCurrent);
+          break;
+        }
+        default: {
+          const hex = packet.map(b => b.toString(16).padStart(2, '0')).join(' ');
+          log(`📦 未识别 Packet: ${hex}`);
+          console.log(`📦 未识别 Packet: ${hex}`);
+        }
+      }
+    }
+
+    async function sendHex(hexStr) {
+      if (!writer) {
+        log("❗ 请先连接设备");
+        return;
+      }
+
+      const bytes = hexStr.trim().split(' ').map(h => parseInt(h, 16));
+      await writer.write(new Uint8Array(bytes));
+      log("➡️ 已发送: " + hexStr);
+    }
+
+    // Shortcuts
+    function sendStart() { sendHex('f1 b1 db 01 01 dd'); }
+    function sendStop() { sendHex('f1 b1 db 01 00 dc'); }
+
+    function log(msg) {
+      const logBox = document.getElementById('log');
+      const lines = logBox.value.length > 0 ? logBox.value.split('\n') : [];
+
+      if (lines.length >= 1000) {
+        lines.splice(0, lines.length - 999);
+      }
+
+      lines.push(msg);
+      logBox.value = lines.join('\n');
+      logBox.scrollTop = logBox.scrollHeight;
+    }
+
+    function clearLog() {
+      const logBox = document.getElementById('log');
+      logBox.value = '';
+    }
+
+    function exportCSV() {
+      const lines = [
+        'Time,Voltage(V),Current(A),Power(W)'
+      ];
+
+      for (let i = 0; i < charts.voltage.data.labels.length; ++i) {
+        const dt = charts.voltage.data.labels[i];
+        const voltage = charts.voltage.data.datasets[0].data[i];
+        const current = charts.current.data.datasets[0].data[i];
+        const power = charts.power.data.datasets[0].data[i];
+        const row = `${dt.toISOString()},${voltage.toFixed(4)},${current.toFixed(4)},${power.toFixed(4)}`;
+        lines.push(row);
+      }
+
+      const content = lines.join('\n');
+      const blob = new Blob([content], { type: 'text/csv' });
+      const blobUrl = URL.createObjectURL(blob);
+
+      const a = document.createElement('a');
+      a.href = blobUrl;
+      a.download = 'a.csv';
+      a.style.display = 'none';
+      document.body.appendChild(a);
+      a.click();
+
+      document.body.removeChild(a);
+      URL.revokeObjectURL(blobUrl);
+    }
+
+    window.addEventListener("load", initCharts);
+    window.addEventListener("beforeunload", disconnectDevice);
+  </script>
+</body>
+</html>
